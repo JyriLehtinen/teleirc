@@ -567,9 +567,8 @@ exports.parseMsg = function(msg, myUser, tg, callback) {
     } else if (msg.location) {
         callback({
             channel: channel,
-            text: prefix + '(Location, ' + 'lon: ' + msg.location.longitude +
-                    ', lat: ' + msg.location.latitude + ')'
-        });
+            text: prefix + 'https://www.google.com/maps/search/?api=1&query=' + msg.location.latitude + ',' + msg.location.longitude
+			});
     } else if (msg.new_chat_participant) {
         callback({
             channel: channel,
