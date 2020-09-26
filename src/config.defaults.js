@@ -103,6 +103,7 @@ config.usernameFallbackFormat = '%firstName% %lastName%';
 //
 // Tip: you can set this to \n if you want them as separate messages on IRC
 config.replaceNewlines = ' … ';
+config.replaceNewlines = '\n';
 
 config.ircNick = 'tgBot';
 config.ircServer = 'irc.cs.hut.fi';
