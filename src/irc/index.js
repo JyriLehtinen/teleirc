@@ -290,6 +290,21 @@ var init = function(msgCallback) {
         });
     });
 
+	// Handle failed reconnect, wait 5 minutes and try connecting
+    nodeIrc.on('close', function() {
+		setTimeout( () => {
+			nodeIrc.connect({
+				host: config.ircServer,
+				nick: config.ircNick,
+				port: config.ircOptions.port,
+				tls: config.ircOptions.secure,
+				password: config.ircOptions.password,
+				username: config.ircOptions.userName,
+				gecos: config.ircOptions.realName,
+			});
+		}, 300*1000);
+    });
+
     return {
         send: function(message, multi) {
 
