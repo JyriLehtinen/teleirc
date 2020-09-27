@@ -29,6 +29,7 @@ sudo apt-get install libicu-dev
 
 Quick start
 -----------
+(I only run this in docker, please use the provided Dockerfile to compile and run the application. You need to set the volumes and such yourself, though)
 
 Make sure you've installed the [latest LTS version of Node.js](https://nodejs.org/en/).
 
@@ -48,9 +49,6 @@ Make sure you've installed the [latest LTS version of Node.js](https://nodejs.or
    IRC to the correct Telegram group possible.
 
 Optional:
-
-- For your convenience, there is an included systemd unit file:
-  [teleirc.service](extras/teleirc.service)
 - You can change your Telegram Bot's profile picture with the `/setuserpic`
   BotFather command. [Here's](/extras/icon.png) an example icon for you.
 - You can tell Telegram which commands the teleirc bot supports by using the
@@ -75,8 +73,3 @@ Contributing
 ------------
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for developer info
-
-Docker install
---------------
-
-See the [README for Docker](extras/Docker_README.md)
