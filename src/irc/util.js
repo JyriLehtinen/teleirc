@@ -7,22 +7,37 @@ exports.lookupChannel = function(chanName, channels) {
     })[0];
 };
 
-// generates channel list for ircOptions
-exports.getChannels = function(arr) {
-    var result = [];
-
-    for (var i = 0; i < arr.length; i++) {
-        var chanName = arr[i].chanPwd ?
-                       arr[i].ircChan + ' ' + arr[i].chanPwd :
-                       arr[i].ircChan;
-        result.push(chanName);
+exports.lookupChannel2 = function(chanName, user, channels) {
+    if (user) {
+        var channel = channels.filter(function(channel) {
+            return channel.ircChan.toLowerCase() === user.toLowerCase();
+        })[0];
+        if (channel) {
+            return channel;
+        }
     }
-
-    return result;
+    return channels.filter(function(channel) {
+        return channel.ircChan.toLowerCase() === chanName.toLowerCase();
+    })[0];
 };
 
 exports.parseMsg = function(chanName, text) {
     var channel = exports.lookupChannel(chanName, config.channels);
+    if (!channel) {
+        logger.error('channel ' + chanName + ' not found in config!');
+        return;
+    }
+
+    text = text.trim();
+
+    return {
+        channel: channel,
+        text: text
+    };
+};
+
+exports.parseMsg2 = function(chanName, user, text) {
+    var channel = exports.lookupChannel2(chanName, user, config.channels);
     if (!channel) {
         logger.error('channel ' + chanName + ' not found in config!');
         return;
@@ -54,10 +69,10 @@ exports.parseTopic = function(chanName, topic, user) {
         return;
     }
 
-    // ignore first topic event when joining channel
-    // (doesn't handle rejoins yet)
-    if (!channel.firstTopicRcvd) {
-        channel.firstTopicRcvd = true;
+    // ignore first topic event when joining channel and unchanged topics
+    // (should handle rejoins)
+    if (!channel.previousTopic || channel.previousTopic === topic) {
+        channel.previousTopic = topic;
         return;
     }
 

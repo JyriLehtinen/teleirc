@@ -20,7 +20,7 @@ var init = function(msgCallback) {
     tg.getMe().then(function(me) {
         myUser = me;
 
-        tg.on('message', function(msg) {
+        var recieveMessage = function(msg) {
             logger.debug('got tg msg:', msg);
 
             tgUtil.parseMsg(msg, myUser, tg, function(message) {
@@ -41,7 +41,12 @@ var init = function(msgCallback) {
                     msgCallback(message);
                 }
             });
-        });
+        };
+
+        tg.on('message', recieveMessage);
+        if (config.relayEdited) {
+            tg.on('edited_message', recieveMessage);
+        }
     });
 
     return {
@@ -70,8 +75,21 @@ var init = function(msgCallback) {
                 message.text = '<' + message.user + '> ' + message.text;
             }
 
+            // var sendMessage = function(message) {
+            //     tg.sendMessage(message.channel.tgChatId, message.text)/*.timeout(30000)*/.then(res => {
+            //         logger.verbose('   [  success  ] :', message.text);
+            //     }).catch(error => {
+            //         logger.verbose('   [ resending ] :', message.text);
+            //         sendMessage(message);
+            //     });
+            // };
+
             logger.verbose('>> relaying to TG:', message.text);
-            tg.sendMessage(message.channel.tgChatId, message.text);
+            // sendMessage(message);
+            tg.sendMessage(
+                message.channel.tgChatId,
+                tgUtil.stripIrcCodes(message.text)
+            );
         }
     };
 };

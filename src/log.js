@@ -1,5 +1,7 @@
 var logger = require('winston');
 
+
+/*
 logger.setLevels({
     silly:   5,
     debug:   4,
@@ -8,6 +10,9 @@ logger.setLevels({
     warn:    1,
     error:   0,
 });
+*/
+
+logger.level = 'DEBUG'
 
 logger.addColors({
     silly:   'magenta',
@@ -21,7 +26,8 @@ logger.addColors({
 logger.remove(logger.transports.Console);
 logger.add(logger.transports.Console, {
     colorize: true,
-    prettyPrint: true
+    prettyPrint: true,
+    timestamp: function() { return (new Date()).toTimeString().split(' ')[0]; }
 });
 
 module.exports = logger;

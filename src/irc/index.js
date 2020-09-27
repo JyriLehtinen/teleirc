@@ -28,8 +28,6 @@ var shouldRelayEvent = function(event) {
 };
 
 var init = function(msgCallback) {
-    config.ircOptions.channels = ircUtil.getChannels(config.channels);
-
     var nodeIrc = new NodeIrc.Client();
     nodeIrc.connect({
         host: config.ircServer,
@@ -50,8 +48,8 @@ var init = function(msgCallback) {
         config.ircPerformCmds.forEach(function(cmd) {
             nodeIrc.raw.apply(nodeIrc, cmd.split(' '));
         });
-        config.ircOptions.channels.forEach(function(channel) {
-            nodeIrc.join(channel);
+        config.channels.forEach(function(channel) {
+            nodeIrc.join(channel.ircChan, channel.chanPwd);
         });
     });
 
@@ -67,10 +65,16 @@ var init = function(msgCallback) {
             return;
         }
 
-        var message = ircUtil.parseMsg(chanName, text);
+        var userName = '';
+        if (chanName.toLowerCase() === nodeIrc.user.nick.toLowerCase()) {
+            chanName = config.ircNick;
+            userName = user;
+        }
+
+        var message = ircUtil.parseMsg2(chanName, userName, text);
 
         if (message) {
-            var channel = ircUtil.lookupChannel(chanName, config.channels);
+            var channel = ircUtil.lookupChannel2(chanName, userName, config.channels);
             var ircChanReadOnly = channel.ircChanReadOnly;
             var isOverrideReadOnly = channel.ircChanOverrideReadOnly;
             var isBotHighlighted = config.hlRegexp.exec(message.text);
@@ -108,10 +112,16 @@ var init = function(msgCallback) {
             return;
         }
 
-        var notice = ircUtil.parseMsg(chanName, text);
+        var userName = '';
+        if (chanName.toLowerCase() === nodeIrc.user.nick.toLowerCase()) {
+            chanName = config.ircNick;
+            userName = user;
+        }
+
+        var notice = ircUtil.parseMsg2(chanName, userName, text);
 
         if (notice) {
-            var channel = ircUtil.lookupChannel(chanName, config.channels);
+            var channel = ircUtil.lookupChannel2(chanName, userName, config.channels);
             var ircChanReadOnly = channel.ircChanReadOnly;
             var isOverrideReadOnly = channel.ircChanOverrideReadOnly;
             var isBotHighlighted = config.hlRegexp.exec(notice.text);
@@ -146,12 +156,18 @@ var init = function(msgCallback) {
         var chanName = event.target;
         var text = event.message;
 
-        var message = ircUtil.parseMsg(chanName, text);
+        var userName = '';
+        if (chanName.toLowerCase() === nodeIrc.user.nick.toLowerCase()) {
+            chanName = config.ircNick;
+            userName = user;
+        }
+
+        var message = ircUtil.parseMsg2(chanName, userName, text);
 
         if (message) {
             var messageText = user + ': ' + message.text;
             if (config.emphasizeAction) {
-                messageText = '*' + messageText + '*';
+                messageText = '* ' + messageText + ' *';
             }
 
             msgCallback({
@@ -249,6 +265,13 @@ var init = function(msgCallback) {
         return;
     });
 
+    nodeIrc.on('nick', function(event) {
+        if (nodeIrc.user.nick === event.nick) {
+            logger.debug('new nick:', event.new_nick);
+            nodeIrc.user.nick = event.new_nick;
+        }
+    });
+
     // added since framework does not have async
     // method to return nicklist
     nodeIrc.on('wholist', function(event) {
@@ -265,6 +288,21 @@ var init = function(msgCallback) {
             user: '',
             text: 'Users in ' + event.target + ':\n\n' + users
         });
+    });
+
+	// Handle failed reconnect, wait 5 minutes and try connecting
+    nodeIrc.on('close', function() {
+		setTimeout( () => {
+			nodeIrc.connect({
+				host: config.ircServer,
+				nick: config.ircNick,
+				port: config.ircOptions.port,
+				tls: config.ircOptions.secure,
+				password: config.ircOptions.password,
+				username: config.ircOptions.userName,
+				gecos: config.ircOptions.realName,
+			});
+		}, 300*1000);
     });
 
     return {
@@ -284,12 +322,17 @@ var init = function(msgCallback) {
             // replace newlines
             message.text = message.text.replace(/\n/g, config.replaceNewlines);
 
-            // TODO: replace here any remaining newlines with username
-            // (this can happen if user configured replaceNewlines to itself
-            // contain newlines)
-
             logger.verbose('<< relaying to IRC:', message.text);
-            nodeIrc.say(message.channel.ircChan, message.text);
+            if (config.replaceNewlines.indexOf('\n') < 0) {
+                logger.verbose('<< relaying to IRC:', message.text);
+                nodeIrc.say(message.channel.ircChan, message.text);
+            } else {
+                var username = message.text.slice(0, message.text.indexOf('>') + 2);
+                var rest = message.text.slice(message.text.indexOf('>') + 2);
+                rest.split('\n').forEach(function(msg) {
+                    nodeIrc.say(message.channel.ircChan, username + msg);
+                });
+            }
         },
         getNames: function(channel) {
             nodeIrc.who(channel.ircChan);

@@ -1,5 +1,6 @@
 var config = require('../config');
 var nickcolor = require('./nickcolor');
+var imgurUtils = require('./imgur-utils');
 var nodeStatic = require('node-static');
 var fs = require('fs');
 var path = require('path');
@@ -7,29 +8,50 @@ var osHomedir = require('os-homedir');
 var mkdirp = require('mkdirp');
 var crypto = require('crypto');
 var logger = require('winston');
-var imgur = require('imgur');
 var os = require('os');
 var child_process = require('child_process');
-
-if (config.uploadToImgur) {
-    imgur.setClientId(config.imgurClientId);
-}
+var mime = require('mime');
+var https = require('https');
 
 var argv = require('../arguments').argv;
 var chatIdsPath = path.dirname(argv.c || path.join(osHomedir(), '.teleirc', 'config.js'));
+var chatIdsFile = path.join(chatIdsPath, 'chatids.json');
+var ChatIds;
+try {
+    ChatIds = JSON.parse(fs.readFileSync(chatIdsFile));
+} catch (e) {
+    ChatIds = null;
+}
+
+function migrateChatIdStorage() {
+    ChatIds = {};
+    logger.warn('Missing chatids.json; attempting to migrate existing chatids.');
+    fs.readdirSync(chatIdsPath).forEach(function(fname) {
+        if (fname.slice(-7) != '.chatid') {
+            return;
+        }
+        channelName = fname.slice(0, -7);
+        try {
+            chatid = JSON.parse(fs.readFileSync(path.join(chatIdsPath, fname)));
+            ChatIds[channelName] = chatid;
+            logger.warn('Successfully migrated ' + fname + '; you must remove it yourself.');
+        } catch (e) {
+            logger.error(
+                'Could not read ' + fname +
+                '. You must migrate it manually yourself.'
+            );
+        }
+    });
+    fs.writeFileSync(chatIdsFile, JSON.stringify(ChatIds));
+    logger.info('successfully migrated chat IDs in ' + chatIdsFile);
+}
 
 exports.readChatId = function(channel) {
-    var chatId;
-    var chatIdPath = path.join(chatIdsPath, channel.tgGroup + '.chatid');
-
-    try {
-        chatId = JSON.parse(fs.readFileSync(chatIdPath));
-        logger.info('successfully read chat ID for group ' + channel.tgGroup);
-    } catch (e) {
-        logger.error('while reading chat ID for group ' + channel.tgGroup);
+    if (!ChatIds) {
+        migrateChatIdStorage();
     }
 
-    if (!chatId) {
+    if (!ChatIds[channel.tgGroup]) {
         logger.warn('NOTE!');
         logger.warn('=====');
         logger.warn('Please add your Telegram bot to a Telegram group and have');
@@ -37,16 +59,19 @@ exports.readChatId = function(channel) {
         logger.warn('teleirc will then automatically store your group chat_id.');
     }
 
-    return chatId;
+    return ChatIds[channel.tgGroup];
 };
 
 exports.writeChatId = function(channel) {
-    var chatId = JSON.stringify(channel.tgChatId);
-    var chatIdPath = path.join(chatIdsPath, channel.tgGroup + '.chatid');
+    if (!ChatIds) {
+        migrateChatIdStorage();
+    }
+
+    ChatIds[channel.tgGroup] = JSON.stringify(channel.tgChatId);
 
     try {
-        fs.writeFileSync(chatIdPath, chatId);
-        logger.info('successfully stored chat ID in ' + chatIdPath);
+        fs.writeFileSync(chatIdsFile, JSON.stringify(ChatIds));
+        logger.info('successfully stored chat ID in ' + chatIdsFile);
     } catch (e) {
         logger.error('error while storing chat ID:', e);
     }
@@ -77,15 +102,18 @@ exports.getName = function(user, config) {
     return name;
 };
 
-exports.getIRCName = function(msg, config) {
-    var ircNickMatchRE = /^<(.*)>/;
+exports.getIRCName = function(msg, config, fallback) {
+    var ircNickMatchRE = /^<(.*)> (.*)/;
     var results = ircNickMatchRE.exec(msg.text);
     var name;
-    if (!results) {
+    if (results) {
+        name = results[1];
+        msg.text = results[2];
+    } else if (fallback) {
         // Fall back to telegram name (i.e. for the topic change message)
         name = exports.getName(msg.from || msg.forward_from, config);
     } else {
-        name = results[1];
+        name = '';
     }
 
     return name;
@@ -136,39 +164,56 @@ exports.convertMedia = function(filePath, config) {
             }
         }
     }
-    return filePath;
-};
-
-exports.serveFile = function(fileId, config, tg, callback) {
-    var filesPath = path.join(chatIdsPath, 'files');
-
-    var randomString = exports.randomValueBase64(config.mediaRandomLength);
-    mkdirp(path.join(filesPath, randomString));
-    tg.downloadFile(fileId, path.join(filesPath, randomString))
-    .then(function(filePath) {
-        return exports.convertMedia(filePath, config);
-    })
-    .then(function(filePath) {
-        callback(config.httpLocation + '/' + randomString + '/' + path.basename(filePath));
+    return new Promise(function(resolve) {
+        resolve(filePath);
     });
 };
 
-exports.uploadToImgur = function(fileId, config, tg, callback) {
-    var filesPath = os.tmpdir();
+exports.serveFile = function(fileId, mimetype, config, tg, callback) {
+    var filesPath = path.join(chatIdsPath, 'files');
     var randomString = exports.randomValueBase64(config.mediaRandomLength);
-    mkdirp(path.join(filesPath, randomString));
-    tg.downloadFile(fileId, path.join(filesPath, randomString))
-    .then(function(filePath) {
-            imgur.uploadFile(filePath)
-            .then(function(json) {
-                callback(json.data.link);
+    var filePath = path.join(filesPath, randomString + '.' + mime.getExtension(mimetype));
+    tg.getFileLink(fileId)
+    .then(function(link) {
+        https.get(link)
+        .on('response', function(res) {
+            if (res.statusCode != 200) {
+                logger.error(
+                    'Could not save file: ( ' + 'Status code: ' + res.statusCode + ' )'
+                );
+                return callback('Could not save file.');
+            }
+
+            res.pipe(fs.createWriteStream(filePath))
+            .on('error', function(e) {
+                logger.error(
+                    'Could not save file: ( ' + e.toString() + ' )'
+                );
+                return callback('Could not save file.');
+            }).on('finish', function() {
+                exports.convertMedia(filePath, config)
+                .then(function(filePath) {
+                    callback(
+                        config.httpLocation + '/' + path.basename(filePath)
+                    );
+                });
             });
+        })
+        .on('error', function(e) {
+            logger.error(
+                'Could not save file: ( ' + e.toString() + ' )'
+            );
+            return callback('Could not save file.');
         });
+    });
 };
 
 exports.initHttpServer = function() {
     var filesPath = path.join(chatIdsPath, 'files');
     mkdirp(filesPath);
+    if (config.externalWebServer) {
+        return;
+    }
 
     var fileServer = new nodeStatic.Server(filesPath);
 
@@ -233,12 +278,23 @@ var reconstructMarkdown = function(msg) {
     });
 };
 
+var isMedia = function(msg) {
+    return Boolean(msg.audio || msg.document || msg.photo || msg.sticker ||
+        msg.video || msg.voice || msg.contact || msg.location);
+};
+
 exports.parseMsg = function(msg, myUser, tg, callback) {
     // TODO: Telegram code should not have to deal with IRC channels at all
 
     var channel = config.channels.filter(function(channel) {
         return channel.tgGroup === msg.chat.title;
     })[0];
+
+    if (!channel) {
+        channel = config.channels.filter(function(channel) {
+            return msg.chat.type === 'private' && channel.tgGroup === msg.chat.username;
+        })[0];
+    }
 
     if (!channel) {
         logger.verbose('Telegram group not found in config: "' +
@@ -259,7 +315,28 @@ exports.parseMsg = function(msg, myUser, tg, callback) {
         exports.writeChatId(channel);
     }
 
-    var age = Math.floor(Date.now() / 1000) - msg.date;
+    var userName = '';
+    if (channel && msg.chat.type === 'private') {
+        if (msg.reply_to_message && msg.reply_to_message.from.username === myUser.username) {
+            userName = exports.getIRCName(msg.reply_to_message, config, false);
+        } else if (!(msg.forward_from || msg.forward_from_chat)) {
+            userName = exports.getIRCName(msg, config, false);
+        }
+        if (userName) {
+            channel = {
+                ircChan: userName
+            };
+        } else {
+            logger.verbose('Replied nickname not found, dropping message...');
+            return callback();
+        }
+    }
+
+    var date = msg.date;
+    if (msg.edit_date) {
+        date = msg.edit_date;
+    }
+    var age = Math.floor(Date.now() / 1000) - date;
     if (config.maxMsgAge && age > config.maxMsgAge) {
         logger.warn('skipping ' + age + ' seconds old message! ' +
             'NOTE: change this behaviour with config.maxMsgAge, also check your system clock');
@@ -267,11 +344,10 @@ exports.parseMsg = function(msg, myUser, tg, callback) {
     }
 
     // skip posts containing media if it's configured off
-    if ((msg.audio || msg.document || msg.photo || msg.sticker || msg.video ||
-                msg.voice || msg.contact || msg.location) && !config.showMedia) {
-        // except if the media object is an photo and imgur uploading is
+    if (isMedia(msg) && !config.showMedia) {
+        // except if the media object is a photo or a sticker and imgur uploading is
         // enabled
-        if (!(msg.photo && config.uploadToImgur)) {
+        if (!((msg.photo || msg.sticker) && config.uploadToImgur)) {
             return callback();
         }
     }
@@ -327,28 +403,41 @@ exports.parseMsg = function(msg, myUser, tg, callback) {
         reconstructMarkdown(msg);
     }
 
-    if (msg.reply_to_message && msg.text) {
+    if (msg.edit_date && msg.text) {
+        msg.text = '[Edit] ' + msg.text;
+    }
+
+    if (msg.reply_to_message && msg.text && !userName) {
         var replyName;
+        var replyMsg = msg.reply_to_message;
 
         // is the replied to message originating from the bot?
-        if (msg.reply_to_message.from.username == myUser.username) {
-            replyName = exports.getIRCName(msg.reply_to_message, config);
+        if (replyMsg.from.username == myUser.username) {
+            replyName = exports.getIRCName(replyMsg, config, true);
         } else {
-            replyName = exports.getName(msg.reply_to_message.from, config);
+            replyName = exports.getName(replyMsg.from, config);
         }
 
         // Show snippet of message being replied to
         var snippet = '';
         if (config.replySnippetLength) {
-            if (!msg.reply_to_message.text) {
-                truncatedMessage = '<reply to image>';
-            } else {
-                truncatedMessage = msg.reply_to_message.text
+            if (isMedia(replyMsg)) {
+                truncatedMessage = '<reply to media>';
+            } else if (replyMsg.new_chat_participant) {
+                truncatedMessage = exports.getName(replyMsg.new_chat_participant,
+                    config) + ' was added by: ' + exports.getName(msg.from, config);
+            } else if (replyMsg.left_chat_participant) {
+                truncatedMessage = exports.getName(replyMsg.left_chat_participant,
+                    config) + ' was removed by: ' + exports.getName(msg.from, config);
+            } else if (replyMsg.text) {
+                truncatedMessage = replyMsg.text
                                    .substr(0, config.replySnippetLength)
                                    .trim();
-                if (truncatedMessage.length < msg.reply_to_message.text.length) {
+                if (truncatedMessage.length < replyMsg.text.length) {
                     truncatedMessage = truncatedMessage + ' …';
                 }
+            } else {
+                truncatedMessage = '<reply to unk>';
             }
             snippet = ' [' + truncatedMessage + ']';
         }
@@ -363,7 +452,7 @@ exports.parseMsg = function(msg, myUser, tg, callback) {
 
         // is the forwarded message originating from the bot?
         if (from.username == myUser.username) {
-            fwdName = exports.getIRCName(msg, config);
+            fwdName = exports.getIRCName(msg, config, true);
         } else {
             fwdName = exports.getName(from, config);
         }
@@ -373,14 +462,14 @@ exports.parseMsg = function(msg, myUser, tg, callback) {
             text: prefix + 'Fwd from ' + fwdName + ': ' + msg.text
         });
     } else if (msg.audio) {
-        exports.serveFile(msg.audio.file_id, config, tg, function(url) {
+        exports.serveFile(msg.audio.file_id, msg.audio.mime_type, config, tg, function(url) {
             callback({
                 channel: channel,
                 text: prefix + '(Audio, ' + msg.audio.duration + 's)' + url
             });
         });
     } else if (msg.document) {
-        exports.serveFile(msg.document.file_id, config, tg, function(url) {
+        exports.serveFile(msg.document.file_id, msg.document.mime_type, config, tg, function(url) {
             callback({
                 channel: channel,
                 text: prefix + '(Document) ' + url
@@ -390,7 +479,7 @@ exports.parseMsg = function(msg, myUser, tg, callback) {
         // pick the highest quality photo
         var photo = msg.photo[msg.photo.length - 1];
         if (config.uploadToImgur) {
-            exports.uploadToImgur(photo.file_id, config, tg, function(url) {
+            imgurUtils.uploadToImgur(photo.file_id, config, tg, function(url) {
                 callback({
                     channel: channel,
                     text: prefix + '(Photo, ' + photo.width + 'x' + photo.height + ') ' +
@@ -398,51 +487,71 @@ exports.parseMsg = function(msg, myUser, tg, callback) {
                 });
             });
         } else {
-            exports.serveFile(photo.file_id, config, tg, function(url) {
-                callback({
-                    channel: channel,
-                    text: prefix + '(Photo, ' + photo.width + 'x' + photo.height + ') ' +
-                    url + (msg.caption ? ' ' + msg.caption : '')
-                });
-            });
+            exports.serveFile(
+                photo.file_id,
+                mime.getType(path.extname(photo.file_id)) || 'image/png',
+                config, tg,
+                function(url) {
+                    callback({
+                        channel: channel,
+                        text: prefix + '(Photo, ' + photo.width + 'x' + photo.height + ') ' +
+                        url + (msg.caption ? ' ' + msg.caption : '')
+                    });
+                }
+            );
         }
     } else if (msg.new_chat_photo) {
         // pick the highest quality photo
         var chatPhoto = msg.new_chat_photo[msg.new_chat_photo.length - 1];
         if (config.uploadToImgur) {
-            exports.uploadToImgur(chatPhoto.file_id, config, tg, function(url) {
+            imgurUtils.uploadToImgur(chatPhoto.file_id, config, tg, function(url) {
                 callback({
                     channel: channel,
                     text: prefix + '(New chat photo, ' +
                     chatPhoto.width + 'x' + chatPhoto.height + ') ' + url
                 });});
         } else {
-            exports.serveFile(chatPhoto.file_id, config, tg, function(url) {
+            exports.serveFile(
+                chatPhoto.file_id,
+                mime.getType(path.extname(chatPhoto.file_id)) || 'image/png',
+                config, tg,
+                function(url) {
+                    callback({
+                        channel: channel,
+                        text: prefix + '(New chat photo, ' +
+                        chatPhoto.width + 'x' + chatPhoto.height + ') ' + url
+                    });
+                }
+            );
+        }
+    } else if (msg.sticker) {
+        if (config.uploadToImgur) {
+            imgurUtils.uploadToImgur(msg.sticker.file_id, config, tg, function(url) {
                 callback({
                     channel: channel,
-                    text: prefix + '(New chat photo, ' +
-                    chatPhoto.width + 'x' + chatPhoto.height + ') ' + url
+                    text: prefix + '(Sticker, ' +
+                            msg.sticker.width + 'x' + msg.sticker.height + ') ' + url
+                });
+            });
+        } else {
+            exports.serveFile(msg.sticker.file_id, 'image/webp', config, tg, function(url) {
+                callback({
+                    channel: channel,
+                    text: prefix + '(Sticker, ' +
+                            msg.sticker.width + 'x' + msg.sticker.height + ') ' + url
                 });
             });
         }
-    } else if (msg.sticker) {
-        exports.serveFile(msg.sticker.file_id, config, tg, function(url) {
-            callback({
-                channel: channel,
-                text: prefix + '(Sticker, ' +
-                        msg.sticker.width + 'x' + msg.sticker.height + ') ' + url
-            });
-        });
     } else if (msg.video) {
-        exports.serveFile(msg.video.file_id, config, tg, function(url) {
+        exports.serveFile(msg.video.file_id, msg.video.mime_type, config, tg, function(url) {
             callback({
                 channel: channel,
-                text: prefix + '(Video, ' + msg.video.duration + 's)' +
+                text: prefix + '(Video, ' + msg.video.duration + 's) ' +
                     url + (msg.caption ? ' ' + msg.caption : '')
             });
         });
     } else if (msg.voice) {
-        exports.serveFile(msg.voice.file_id, config, tg, function(url) {
+        exports.serveFile(msg.voice.file_id, msg.voice.mime_type, config, tg, function(url) {
             callback({
                 channel: channel,
                 text: prefix + '(Voice, ' + msg.voice.duration + 's) ' + url
@@ -458,9 +567,8 @@ exports.parseMsg = function(msg, myUser, tg, callback) {
     } else if (msg.location) {
         callback({
             channel: channel,
-            text: prefix + '(Location, ' + 'lon: ' + msg.location.longitude +
-                    ', lat: ' + msg.location.latitude + ')'
-        });
+            text: prefix + 'https://www.google.com/maps/search/?api=1&query=' + msg.location.latitude + ',' + msg.location.longitude
+			});
     } else if (msg.new_chat_participant) {
         callback({
             channel: channel,
@@ -482,4 +590,10 @@ exports.parseMsg = function(msg, myUser, tg, callback) {
         logger.warn('WARNING: unhandled message:', msg);
         callback();
     }
+};
+
+exports.stripIrcCodes = function(text) {
+    return text.replace(
+        /\x03[0-9][0-9]?(?:,[0-9][0-9]?)?|[\x02\x03\x0f\x16\x1d\x1f]/g, ''
+    );
 };
